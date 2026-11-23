@@ -12,18 +12,23 @@
  */
 
 import type { AgentEvent, Command, Capability, SessionHandle } from '@agentoffice/core'
+import { SqliteStore } from '../store'
 
 export interface Approval {
   id: string
   action: string
+  actionHash: string // Hash of action + context to prevent tampering
   risk: 'low' | 'medium' | 'high'
   requestedBy: string // agentId or 'operator'
   expiresAt: string
   status: 'pending' | 'approved' | 'denied' | 'expired'
   context: Record<string, unknown> // additional context (what tool, what folder, etc.)
+  createdAt: string
+  decidedAt: string | null
+  decidedBy: string | null
 }
 
-export interface PolicyConfig {
+export interface ApprovalConfig {
   /** Default timeout for approvals in milliseconds (5 minutes default) */
   approvalTimeout: number
   /** Budget limit per agent per hour in USD */
@@ -34,17 +39,35 @@ export interface PolicyConfig {
   requireApprovalForNetwork: boolean
 }
 
+export type ApprovalStatus = 'pending' | 'approved' | 'denied' | 'expired'
+export type ApprovalDecision = 'approve' | 'deny'
+
+export interface ApprovalResult {
+  approvalId: string
+  status: ApprovalStatus
+  previousStatus: ApprovalStatus
+  decidedAt: string
+  decidedBy: string
+}
+
 export class PolicyEngine {
   private approvals: Map<string, Approval> = new Map()
-  private config: PolicyConfig
+  private config: ApprovalConfig
   private budgets: Map<string, { used: number; resetAt: Date }> = new Map()
+  private store: SqliteStore | null = null
 
-  constructor(config: PolicyConfig = {} as PolicyConfig) {
+  constructor(config: ApprovalConfig = {} as ApprovalConfig) {
     this.config = config
   }
 
+  /** Set the store for persistent approval storage. */
+  setStore(store: SqliteStore): void {
+    this.store = store
+    this.loadApprovalsFromStore()
+  }
+
   /** Get default policy configuration. */
-  static getDefaultConfig(): PolicyConfig {
+  static getDefaultConfig(): ApprovalConfig {
     return {
       approvalTimeout: 5 * 60 * 1000, // 5 minutes
       hourlyBudgetUsd: 0.10, // $0.10 per hour default
@@ -53,50 +76,206 @@ export class PolicyEngine {
     }
   }
 
-  /** Create a new pending approval. Returns the approvalId. */
-  createApproval(approval: Omit<Approval, 'id' | 'expiresAt' | 'status'>): string {
+  /** Load approvals from persistent storage on startup. */
+  private async loadApprovalsFromStore(): Promise<void> {
+    if (!this.store) return
+    try {
+      const rows = await this.store.approvals.listPending()
+      for (const row of rows) {
+        const approval: Approval = {
+          ...row,
+          context: JSON.parse(row.context),
+        }
+        // Check if already expired
+        if (new Date(approval.expiresAt) < new Date()) {
+          approval.status = 'expired'
+          this.updateApprovalInStore(approval)
+        } else {
+          this.approvals.set(approval.id, approval)
+        }
+      }
+    } catch (err) {
+      console.warn('Could not load approvals from store:', err)
+    }
+  }
+
+  /** Compute hash of action + context to bind approval to exact operation. */
+  private computeActionHash(action: string, context: Record<string, unknown>): string {
+    const str = JSON.stringify({ action, context }, Object.keys({ action, context }).sort())
+    let hash = 0
+    for (let i = 0; i < str.length; i++) {
+      hash = ((hash << 5) - hash) + str.charCodeAt(i)
+      hash |= 0
+    }
+    return Math.abs(hash).toString(36)
+  }
+
+  /** Create a new pending approval. Returns the approvalId.
+   * Server owns the approval ID - agent provides request, server generates ID. */
+  createApproval(approval: Omit<Approval, 'id' | 'expiresAt' | 'status' | 'createdAt' | 'actionHash' | 'decidedAt' | 'decidedBy'>): string {
     const id = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
     const timeout = this.config.approvalTimeout ?? PolicyEngine.getDefaultConfig().approvalTimeout
     const expiresAt = new Date(Date.now() + timeout).toISOString()
+    const createdAt = new Date().toISOString()
+    const actionHash = this.computeActionHash(approval.action, approval.context)
+
     const newApproval: Approval = {
       id,
       action: approval.action,
+      actionHash,
       risk: approval.risk,
       requestedBy: approval.requestedBy,
       expiresAt,
       status: 'pending',
       context: approval.context,
+      createdAt,
+      decidedAt: null,
+      decidedBy: null,
     }
+
     this.approvals.set(id, newApproval)
+    this.saveApprovalToStore(newApproval)
     return id
   }
 
-  /** Get a pending approval by ID. */
-  getPendingApproval(approvalId: string): Approval | undefined {
-    return this.approvals.get(approvalId)
+  /** Save approval to persistent storage. */
+  private saveApprovalToStore(approval: Approval): void {
+    if (!this.store) return
+    try {
+      this.store.approvals.save({
+        id: approval.id,
+        action: approval.action,
+        actionHash: approval.actionHash,
+        risk: approval.risk,
+        requestedBy: approval.requestedBy,
+        expiresAt: approval.expiresAt,
+        status: approval.status,
+        context: approval.context,
+        createdAt: approval.createdAt,
+        decidedAt: approval.decidedAt,
+        decidedBy: approval.decidedBy,
+      })
+    } catch (err) {
+      console.warn('Could not save approval to store:', err)
+    }
   }
 
-  /** Approve or deny an approval. Returns the new status. */
-  approveApproval(approvalId: string, status: 'approved' | 'denied'): 'approved' | 'denied' | 'expired' {
-    const approval = this.approvals.get(approvalId)
-    if (!approval) {
-      return 'expired'
+  /** Update approval in persistent storage. */
+  private updateApprovalInStore(approval: Approval): void {
+    if (!this.store) return
+    try {
+      this.store.approvals.updateStatus(approval.id, approval.status, approval.decidedAt ?? '', approval.decidedBy ?? '')
+    } catch (err) {
+      console.warn('Could not update approval in store:', err)
     }
-    approval.status = status
-    return status
+  }
+
+  /** Get a pending approval by ID. */
+  async getPendingApproval(approvalId: string): Promise<Approval | undefined> {
+    // Check memory first
+    const cached = this.approvals.get(approvalId)
+    if (cached) return cached
+
+    // Check store
+    if (this.store) {
+      try {
+        const row = await this.store.approvals.get(approvalId)
+        if (row) {
+          const approval: Approval = {
+            ...row,
+            context: JSON.parse(row.context),
+          }
+          this.approvals.set(approval.id, approval)
+          return approval
+        }
+      } catch (err) {
+        console.warn('Could not load approval from store:', err)
+      }
+    }
+    return undefined
+  }
+
+  /** Approve or deny an approval with strict state machine. */
+  async approveApproval(approvalId: string, decision: ApprovalDecision, decidedBy: string): Promise<ApprovalResult> {
+    const approval = await this.getPendingApproval(approvalId)
+    if (!approval) {
+      throw new Error(`Approval not found: ${approvalId}`)
+    }
+
+    // Check expiry BEFORE allowing decision
+    if (new Date(approval.expiresAt) < new Date()) {
+      approval.status = 'expired'
+      approval.decidedAt = new Date().toISOString()
+      approval.decidedBy = 'system'
+      this.approvals.set(approval.id, approval)
+      this.updateApprovalInStore(approval)
+      throw new Error(`Approval expired: ${approvalId}`)
+    }
+
+    // Strict state machine: only pending can be decided
+    if (approval.status !== 'pending') {
+      throw new Error(`Invalid state transition: cannot ${decision} approval with status ${approval.status}`)
+    }
+
+    const newStatus = decision === 'approve' ? 'approved' : 'denied'
+    const previousStatus = approval.status
+    const decidedAt = new Date().toISOString()
+
+    approval.status = newStatus
+    approval.decidedAt = decidedAt
+    approval.decidedBy = decidedBy
+
+    this.approvals.set(approval.id, approval)
+    this.updateApprovalInStore(approval)
+
+    return {
+      approvalId: approval.id,
+      status: newStatus,
+      previousStatus,
+      decidedAt,
+      decidedBy,
+    }
+  }
+
+  /** Check if an approval is still valid (not expired, not decided). */
+  async isApprovalValid(approvalId: string): Promise<boolean> {
+    const approval = await this.getPendingApproval(approvalId)
+    if (!approval) return false
+    if (approval.status !== 'pending') return false
+    if (new Date(approval.expiresAt) < new Date()) return false
+    return true
+  }
+
+  /** Clean up expired approvals. */
+  cleanupExpiredApprovals(): number {
+    let count = 0
+    for (const [id, approval] of this.approvals) {
+      if (approval.status === 'pending' && new Date(approval.expiresAt) < new Date()) {
+        approval.status = 'expired'
+        approval.decidedAt = new Date().toISOString()
+        approval.decidedBy = 'system'
+        this.approvals.set(id, approval)
+        this.updateApprovalInStore(approval)
+        count++
+      }
+    }
+    return count
   }
 
   /** Check if an agent has exceeded its budget. */
   checkBudget(agentId: string, costUsd: number): { withinBudget: boolean; newUsed: number } {
+    if (!Number.isFinite(costUsd) || costUsd < 0) {
+      throw new Error('Invalid cost value: must be finite non-negative number')
+    }
+
     let record = this.budgets.get(agentId)
     if (!record) {
-      record = { used: 0, resetAt: new Date(Date.now() + 3600000) } // reset in 1 hour
+      record = { used: 0, resetAt: new Date(Date.now() + 3600000) }
       this.budgets.set(agentId, record)
     }
 
     const now = new Date()
     if (now > record.resetAt) {
-      // Reset hourly budget
       record.used = 0
       record.resetAt = new Date(Date.now() + 3600000)
     }
@@ -114,7 +293,10 @@ export class PolicyEngine {
     totalCostUsd: number
     remainingBudgetUsd: number
   } {
-    // Convert tokens to approximate cost
+    if (!Number.isFinite(costUsd) || costUsd < 0) {
+      throw new Error('Invalid cost value: must be finite non-negative number')
+    }
+
     const tokenCostUsd = costUsd ?? this._estimateCost(inputTokens, outputTokens)
 
     const { withinBudget, newUsed } = this.checkBudget(agentId, tokenCostUsd)
@@ -127,9 +309,18 @@ export class PolicyEngine {
   }
 
   private _estimateCost(inputTokens: number, outputTokens: number): number {
-    // Rough estimate: GPT-4 pricing
     const inputCost = (inputTokens / 1000) * 0.002
     const outputCost = (outputTokens / 1000) * 0.008
     return inputCost + outputCost
+  }
+
+  /** Get all pending approvals. */
+  getPendingApprovals(): Approval[] {
+    return Array.from(this.approvals.values()).filter(a => a.status === 'pending')
+  }
+
+  /** Get approval by ID (any status). */
+  async getApproval(approvalId: string): Promise<Approval | undefined> {
+    return this.getPendingApproval(approvalId)
   }
 }

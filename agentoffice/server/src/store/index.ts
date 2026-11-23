@@ -57,6 +57,10 @@ export interface StateStore {
     getToken: () => Promise<string | null>
     /** Validate a token. */
     validate: (token: string) => Promise<boolean>
+    /** Get token info for authenticated socket. */
+    getTokenInfo: (token: string) => Promise<{ operatorId: string; permissions: string[]; expiresAt: string | null; createdAt: string } | null>
+    /** Revoke a token. */
+    revokeToken: (token: string) => Promise<void>
   }
 
   /** Agent registry */
@@ -69,6 +73,20 @@ export interface StateStore {
     list: () => Promise<any[]>
     /** Delete an agent. */
     delete: (agentId: string) => Promise<void>
+  }
+
+  /** Approvals persistence */
+  approvals: {
+    /** Save an approval. */
+    save: (approval: any) => Promise<void>
+    /** Get an approval by ID. */
+    get: (approvalId: string) => Promise<any | null>
+    /** List approvals by status. */
+    listByStatus: (status: string) => Promise<any[]>
+    /** Update approval status. */
+    updateStatus: (approvalId: string, status: string, decidedAt: string, decidedBy: string) => Promise<void>
+    /** List pending approvals. */
+    listPending: () => Promise<any[]>
   }
 }
 

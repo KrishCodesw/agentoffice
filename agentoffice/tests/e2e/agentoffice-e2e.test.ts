@@ -28,8 +28,8 @@ async function setupServerAndAgents(): Promise<{
     driver: 'sqlite',
   })
 
-  // Wait for server to be ready
-  await new Promise(resolve => setTimeout(resolve, 1000))
+  // Initialize server (starts HTTP server)
+  await server.init()
 
   // Connect Mock Adapter
   const mockAdapter = new MockAdapter({

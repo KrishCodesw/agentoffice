@@ -86,10 +86,38 @@ export class SqliteStore implements StateStore {
         updated_at TEXT NOT NULL
       );
 
+      -- Approvals
+      CREATE TABLE IF NOT EXISTS approvals (
+        id TEXT PRIMARY KEY,
+        action TEXT NOT NULL,
+        action_hash TEXT NOT NULL,
+        risk TEXT NOT NULL,
+        requested_by TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        status TEXT NOT NULL, -- 'pending' | 'approved' | 'denied' | 'expired'
+        context TEXT NOT NULL, -- JSON
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        decided_by TEXT
+      );
+
+      -- Agents registry
+      CREATE TABLE IF NOT EXISTS agents (
+        id TEXT PRIMARY KEY,
+        name TEXT,
+        capabilities TEXT NOT NULL, -- JSON array
+        state TEXT NOT NULL,
+        label TEXT,
+        registered_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       -- Indexes
       CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
       CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp);
       CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
+      CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+      CREATE INDEX IF NOT EXISTS idx_approvals_expires ON approvals(expires_at);
     `)
   }
 
@@ -202,9 +230,9 @@ export class SqliteStore implements StateStore {
   auth = {
     saveToken: async (token: string, operatorInfo: Record<string, unknown>): Promise<void> => {
       this.db.prepare(`
-        INSERT OR REPLACE INTO auth_tokens (token, operator_info, created_at)
-        VALUES (?, ?, ?)
-      `).run(token, JSON.stringify(operatorInfo), new Date().toISOString())
+        INSERT OR REPLACE INTO auth_tokens (token, operator_info, created_at, expires_at)
+        VALUES (?, ?, ?, ?)
+      `).run(token, JSON.stringify(operatorInfo), new Date().toISOString(), operatorInfo.expiresAt ?? null)
     },
 
     getToken: async (): Promise<string | null> => {
@@ -215,6 +243,22 @@ export class SqliteStore implements StateStore {
     validate: async (token: string): Promise<boolean> => {
       const row = this.db.prepare('SELECT token FROM auth_tokens WHERE token = ?').get(token) as any
       return !!row
+    },
+
+    getTokenInfo: async (token: string): Promise<{ operatorId: string; permissions: string[]; expiresAt: string | null; createdAt: string } | null> => {
+      const row = this.db.prepare('SELECT operator_info, created_at, expires_at FROM auth_tokens WHERE token = ?').get(token) as any
+      if (!row) return null
+      const info = JSON.parse(row.operator_info)
+      return {
+        operatorId: info.operatorId,
+        permissions: info.permissions,
+        expiresAt: row.expires_at,
+        createdAt: row.created_at,
+      }
+    },
+
+    revokeToken: async (token: string): Promise<void> => {
+      this.db.prepare('DELETE FROM auth_tokens WHERE token = ?').run(token)
     },
   }
 
@@ -246,6 +290,59 @@ export class SqliteStore implements StateStore {
 
     delete: async (agentId: string): Promise<void> => {
       this.db.prepare('DELETE FROM agents WHERE id = ?').run(agentId)
+    },
+  }
+
+  // Approvals persistence
+  approvals = {
+    save: async (approval: any): Promise<void> => {
+      this.db.prepare(`
+        INSERT OR REPLACE INTO approvals (id, action, action_hash, risk, requested_by, expires_at, status, context, created_at, decided_at, decided_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        approval.id,
+        approval.action,
+        approval.actionHash,
+        approval.risk,
+        approval.requestedBy,
+        approval.expiresAt,
+        approval.status,
+        JSON.stringify(approval.context),
+        approval.createdAt,
+        approval.decidedAt ?? null,
+        approval.decidedBy ?? null
+      )
+    },
+
+    get: async (approvalId: string): Promise<any | null> => {
+      const row = this.db.prepare('SELECT * FROM approvals WHERE id = ?').get(approvalId) as any
+      if (!row) return null
+      return {
+        ...row,
+        context: typeof row.context === 'string' ? JSON.parse(row.context) : row.context,
+      }
+    },
+
+    listByStatus: async (status: string): Promise<any[]> => {
+      const rows = this.db.prepare('SELECT * FROM approvals WHERE status = ?').all(status) as any[]
+      return rows.map(row => ({
+        ...row,
+        context: typeof row.context === 'string' ? JSON.parse(row.context) : row.context,
+      }))
+    },
+
+    updateStatus: async (approvalId: string, status: string, decidedAt: string, decidedBy: string): Promise<void> => {
+      this.db.prepare(`
+        UPDATE approvals SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?
+      `).run(status, decidedAt, decidedBy, approvalId)
+    },
+
+    listPending: async (): Promise<any[]> => {
+      const rows = this.db.prepare('SELECT * FROM approvals WHERE status = ?').all('pending') as any[]
+      return rows.map(row => ({
+        ...row,
+        context: typeof row.context === 'string' ? JSON.parse(row.context) : row.context,
+      }))
     },
   }
 

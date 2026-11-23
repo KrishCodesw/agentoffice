@@ -10,7 +10,7 @@
 
 import Fastify, { FastifyInstance } from 'fastify'
 import { Server as HttpServer } from 'http'
-import { Server as SocketIOServer } from 'socket.io'
+import { Server as SocketIOServer, Socket } from 'socket.io'
 import FastifyStatic from '@fastify/static'
 import { Registry } from './registry'
 import { InMemoryBus } from './bus'
@@ -21,7 +21,6 @@ import { CallManagerImpl } from './calls'
 import { AuditLog } from './audit'
 import { SqliteStore } from './store'
 import { OperatorAuth } from './auth'
-import { MockAdapter } from './adapters/mock-adapter'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -35,6 +34,13 @@ export interface ServerConfig {
   port: number
   host: string
   driver: 'sqlite' | 'postgres'
+  allowedOrigins?: string[]
+  requireAuth?: boolean
+}
+
+interface AuthenticatedSocket extends Socket {
+  operatorId?: string
+  authenticated?: boolean
 }
 
 export class AgentOfficeServer {
@@ -52,23 +58,31 @@ export class AgentOfficeServer {
   public httpServer!: HttpServer
 
   private adapters: Map<string, AgentAdapter> = new Map()
+  private pendingCommands: Map<string, { resolve: (v: CommandResult) => void; reject: (e: Error) => void; timeout: NodeJS.Timeout }> = new Map()
+  private config: ServerConfig
 
   constructor(config: ServerConfig) {
+    this.config = config
+    // Default to localhost only for security
+    const safeHost = config.host === '0.0.0.0' ? '127.0.0.1' : config.host
+    const allowedOrigins = config.allowedOrigins ?? [`http://${safeHost}:${config.port}`, `http://${safeHost}:5173`, `http://${safeHost}:5174`, `http://${safeHost}:5175`]
+
     this.app = Fastify()
 
     // Serve web UI static files from the web/dist directory
     const webDistPath = path.resolve(__dirname, '../../web/dist')
     this.app.register(FastifyStatic, {
       root: webDistPath,
-      prefix: '/', // Serve from root
+      prefix: '/',
       decorateReply: false,
     })
 
-    // Initialize Socket.IO on the Fastify server
+    // Initialize Socket.IO on the Fastify server with secure defaults
     this.io = new SocketIOServer(this.app.server, {
       cors: {
-        origin: '*',
+        origin: allowedOrigins,
         methods: ['GET', 'POST'],
+        credentials: true,
       },
     })
 
@@ -81,20 +95,26 @@ export class AgentOfficeServer {
     this.bus = new InMemoryBus()
     this.tasks = new TaskQueue(this.bus)
     this.policy = new PolicyEngine()
+    this.policy.setStore(this.store) // Pass store for persistent approvals
     this.chat = new Chat(this.bus)
     this.calls = new CallManagerImpl(this.bus, this.policy)
     this.registry = new Registry(this.app)
 
+    // Setup Socket.IO authentication middleware FIRST - before any handlers
+    this._setupSocketIOAuth(config.requireAuth ?? true)
+
     // Wire services together
     this._wireServices()
-    this._setupSocketIO()
-    this._registerMockAdapters()
-
-    // Start HTTP server using Fastify's listen
-    this.startServer(config)
+    this._setupSocketIOHandlers()
   }
 
-  private async startServer(config: ServerConfig) {
+  /** Initialize the server - must be called after construction */
+  async init(): Promise<void> {
+    await this._registerAdapters()
+    this.startServer({ port: this.config.port, host: this.config.host })
+  }
+
+  private async startServer(config: { port: number; host: string }) {
     try {
       await this.app.listen({ port: config.port, host: config.host })
       console.log(`AgentOffice server listening on ${config.host}:${config.port}`)
@@ -105,13 +125,58 @@ export class AgentOfficeServer {
     this.httpServer = this.app.server
   }
 
-  private _registerMockAdapters() {
-    // Register mock adapters for demo/testing
+  /**
+   * Socket.IO Authentication Middleware - runs BEFORE any event handlers
+   * This prevents the authentication race condition
+   */
+  private _setupSocketIOAuth(requireAuth: boolean) {
+    this.io.use(async (socket, next) => {
+      // Skip auth for health check endpoint
+      if (socket.handshake.query.health === 'true') {
+        return next()
+      }
+
+      const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.replace('Bearer ', '')
+
+      if (!token) {
+        if (requireAuth) {
+          console.log(`Socket ${socket.id} rejected: no token provided`)
+          return next(new Error('Authentication required'))
+        }
+        // Development mode: allow anonymous but mark as unauthenticated
+        ;(socket as AuthenticatedSocket).authenticated = false
+        return next()
+      }
+
+      try {
+        const valid = await this.auth.validateToken(token)
+        if (!valid) {
+          console.log(`Socket ${socket.id} rejected: invalid token`)
+          return next(new Error('Invalid token'))
+        }
+
+        // Get operator info from stored token
+        const operatorInfo = await this.store.auth.getTokenInfo?.(token)
+        ;(socket as AuthenticatedSocket).operatorId = operatorInfo?.operatorId ?? 'unknown'
+        ;(socket as AuthenticatedSocket).authenticated = true
+        console.log(`Socket ${socket.id} authenticated as ${(socket as AuthenticatedSocket).operatorId}`)
+        next()
+      } catch (err) {
+        console.error(`Socket ${socket.id} auth error:`, err)
+        next(new Error('Authentication failed'))
+      }
+    })
+  }
+
+  private async _registerAdapters() {
+    // Register adapters - in production, this would be config-driven
     const mockAgents = [
       { id: 'mock-1', name: 'Claude', shouldNeedApproval: true },
       { id: 'mock-2', name: 'GPT-4' },
       { id: 'mock-3', name: 'CLI', shouldError: true },
     ]
+
+    const { MockAdapter } = await import('./adapters/mock-adapter')
 
     for (const agentConfig of mockAgents) {
       const adapter = new MockAdapter({
@@ -160,36 +225,51 @@ export class AgentOfficeServer {
     })
   }
 
-  private _setupSocketIO() {
+  /**
+   * Socket.IO Event Handlers - only registered after authentication middleware
+   */
+  private _setupSocketIOHandlers() {
     this.io.on('connection', (socket) => {
-      console.log('Client connected:', socket.id)
+      const authSocket = socket as AuthenticatedSocket
+      console.log(`Client connected: ${socket.id} (authenticated: ${authSocket.authenticated})`)
 
-      // Authenticate operator
-      const token = socket.handshake.auth.token || socket.handshake.headers.authorization?.replace('Bearer ', '')
-      if (token) {
-        this.auth.validateToken(token).then(valid => {
-          if (!valid) {
-            socket.disconnect()
+      // Only allow control commands if authenticated
+      const requireAuth = (handler: (socket: AuthenticatedSocket, ...args: any[]) => void) => {
+        return (...args: any[]) => {
+          if (!authSocket.authenticated) {
+            socket.emit('error', { code: 'UNAUTHENTICATED', message: 'Authentication required' })
             return
           }
-          console.log('Operator authenticated:', socket.id)
-        })
+          handler(authSocket, ...args)
+        }
       }
 
       // Handle commands from UI to agent
-      socket.on('commands', async (data: { agentId: string; command: Command }) => {
-        const { agentId, command } = data
+      socket.on('commands', requireAuth(async (authSocket, data: { agentId: string; command: Command; commandId?: string }) => {
+        const { agentId, command, commandId } = data
         const adapter = this.adapters.get(agentId)
         const session = this.registry.getSession(agentId)
 
         if (!adapter || !session) {
-          socket.emit('command-result', { agentId, result: 'rejected', error: 'Agent not found' })
+          socket.emit('command-result', { agentId, commandId, result: 'rejected', error: 'Agent not found' })
+          return
+        }
+
+        // Idempotency: check if commandId was already processed
+        if (commandId && this.pendingCommands.has(commandId)) {
+          const pending = this.pendingCommands.get(commandId)!
+          clearTimeout(pending.timeout)
+          // Return cached result
+          const result = await adapter.command(session, command)
+          pending.resolve(result)
+          this.pendingCommands.delete(commandId)
+          socket.emit('command-result', { agentId, commandId, result })
           return
         }
 
         try {
           const result = await adapter.command(session, command)
-          socket.emit('command-result', { agentId, command, result })
+          socket.emit('command-result', { agentId, commandId, result })
 
           // If it's an approval command, publish to bus
           if (command.type === 'approve' || command.type === 'deny') {
@@ -197,20 +277,21 @@ export class AgentOfficeServer {
           }
         } catch (error) {
           console.error('Command error:', error)
-          socket.emit('command-result', { agentId, result: 'rejected', error: String(error) })
+          socket.emit('command-result', { agentId, commandId, result: 'rejected', error: String(error) })
         }
-      })
+      }))
 
       // Handle approvals from UI
-      socket.on('approvals', async (data: { approvalId: string; decide: 'approve' | 'deny' }) => {
+      socket.on('approvals', requireAuth(async (authSocket, data: { approvalId: string; decide: 'approve' | 'deny' }) => {
         const { approvalId, decide } = data
-        const status = this.policy.approveApproval(approvalId, decide === 'approve' ? 'approved' : 'denied')
-        this.bus.publish(`approval-${decide}`, { approvalId, status })
-        this.io.emit(`approval-${decide}`, { approvalId, status })
-      })
+        const decision = decide === 'approve' ? 'approve' : 'deny'
+        const result = await this.policy.approveApproval(approvalId, decision, authSocket.operatorId ?? 'unknown')
+        this.bus.publish(`approval-${decide}`, { approvalId, status: result.status })
+        this.io.emit(`approval-${decide}`, { approvalId, status: result.status })
+      }))
 
       socket.on('disconnect', () => {
-        console.log('Client disconnected:', socket.id)
+        console.log(`Client disconnected: ${socket.id}`)
       })
     })
   }
@@ -222,7 +303,7 @@ export class AgentOfficeServer {
     try {
       for await (const event of adapter.events(handle)) {
         // Add agentId to event
-        const enrichedEvent = { ...event, agentId }
+        const enrichedEvent = { ...event, agentId, eventId: `evt-${Date.now()}-${Math.random().toString(36).slice(2,9)}` }
 
         // Publish to bus
         this.bus.publish('agentEvents', enrichedEvent)
@@ -236,15 +317,15 @@ export class AgentOfficeServer {
         }
 
         if (event.type === 'needs_approval') {
-          // Create approval in policy engine
+          // Create approval in policy engine - SERVER owns the approval ID
           const approvalId = this.policy.createApproval({
             action: event.action,
             risk: event.risk,
             requestedBy: agentId,
-            context: { agentId },
+            context: { agentId, originalRequestId: enrichedEvent.eventId },
           })
-          this.bus.publish('approvals', { approvalId, action: event.action, risk: event.risk, status: 'pending' })
-          this.io.emit('approvals', { approvalId, action: event.action, risk: event.risk, status: 'pending' })
+          this.bus.publish('approvals', { approvalId, action: event.action, risk: event.risk, status: 'pending', expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() })
+          this.io.emit('approvals', { approvalId, action: event.action, risk: event.risk, status: 'pending', expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString() })
         }
       }
     } catch (error) {
@@ -256,11 +337,14 @@ export class AgentOfficeServer {
 
 // Main entry point (only runs when executed directly, not when imported)
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const config: ServerConfig = {
-    port: parseInt(process.env.PORT || '3001'),
-    host: process.env.HOST || '0.0.0.0',
-    driver: (process.env.DRIVER as 'sqlite' | 'postgres') || 'sqlite',
-  }
+const config: ServerConfig = {
+  port: parseInt(process.env.PORT || '3001'),
+  host: process.env.HOST || '127.0.0.1', // Default to localhost
+  driver: (process.env.DRIVER as 'sqlite' | 'postgres') || 'sqlite',
+  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') ?? undefined,
+  requireAuth: process.env.REQUIRE_AUTH !== 'false',
+}
 
-  new AgentOfficeServer(config)
+const server = new AgentOfficeServer(config)
+await server.init()
 }
