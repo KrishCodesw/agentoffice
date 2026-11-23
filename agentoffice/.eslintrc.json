@@ -1,0 +1,32 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "node": true
+  },
+  "extends": [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/recommended",
+    "plugin:import/known",
+    "plugin:import/typescript"
+  ],
+  "parser": "@typescript-eslint/parser",
+  "parserOptions": {
+    "ecmaVersion": "latest",
+    "sourceType": "module"
+  },
+  "plugins": [
+    "@typescript-eslint",
+    "import"
+  ],
+  "rules": {
+    "@typescript-eslint/explicit-function-type": "error",
+    "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_" }],
+    "no-console": "warn",
+    "no-unused-expressions": "error",
+    "import/no-unused-modules": "error",
+    "import/extensions": ["error", "js", "jsx", "ts", "tsx"]
+  },
+  "ignorePatterns": ["dist/", "node_modules/"],
+  "files": ["**/*.ts", "**.tsx", "**/*.js", "**.jsx"]
+}

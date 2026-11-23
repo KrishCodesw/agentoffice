@@ -1,0 +1,195 @@
+asyncapi: 2.6.0
+info:
+  title: AgentOffice Protocol
+  version: 0.1.0
+  description: >
+    Single source of truth for messages between the web UI and agent adapters.
+    Types are generated from this file; CI fails if the generated file is out of date.
+servers:
+  agent-office:
+    url: http://localhost:3000
+    description: The AgentOffice server (Fastify + WebSocket)
+    protocol: [websocket]
+channels:
+  # --- World State -----------------------------------------------------------
+  # The current state of all agents in the office. UI subscribes to render the floor.
+  worldState:
+    subscribe: websocket
+    publish: websocket
+    message:
+      payload:
+        agentId:
+          type: string
+        roomId:
+          type: string
+        state:
+          type: string
+          enum: [working, idle, paused, error, offline]
+        capabilities:
+          type: array
+          items:
+            type: string
+            enum: [message, pause, approvals, usage, handoff, takeover, voice]
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+  # --- Agent Events ----------------------------------------------------------
+  # Events sent FROM the agent TO the office. One channel, many agents multiplexed
+  # by agentId in the payload. The generated TypeScript types live in core/src/events.ts.
+  agentEvents:
+    subscribe: websocket
+    publish: websocket
+    message:
+      payload:
+        agentId:
+          type: string
+        sequence:
+          type: integer
+        type:
+          type: string
+          enum: [status, output, tool_call, needs_approval, usage, handoff]
+        state:
+          type: string
+          enum: [working, idle, paused, error, offline]
+          nullable: true
+        text:
+          type: string
+          nullable: true
+        tool:
+          type: string
+          nullable: true
+        summary:
+          type: string
+          nullable: true
+        approvalId:
+          type: string
+          nullable: true
+        action:
+          type: string
+          nullable: true
+        risk:
+          type: string
+          enum: [low, medium, high]
+          nullable: true
+        inputTokens:
+          type: integer
+          nullable: true
+        outputTokens:
+          type: integer
+          nullable: true
+        costUsd:
+          type: number
+          format: float
+          nullable: true
+        artifacts:
+          type: array
+          items:
+            type: string
+          nullable: true
+  # --- Commands --------------------------------------------------------------
+  # Commands sent FROM the office TO the agent. One channel, fan-out to all agents;
+  # each agent filters by command type.
+  commands:
+    subscribe: websocket
+    publish: websocket
+    message:
+      payload:
+        command:
+          type: string
+          enum: [send, pause, resume, stop, approve, deny, takeover]
+        text:
+          type: string
+          nullable: true
+        approvalId:
+          type: string
+          nullable: true
+        targetAgentId:
+          type: string
+          nullable: true
+  # --- Chat Messages ---------------------------------------------------------
+  # General chat messages in the room. Both operator→agent and agent→operator
+  # messages flow through here, threaded by messageId.
+  chat:
+    subscribe: websocket
+    publish: websocket
+    message:
+      payload:
+        messageId:
+          type: string
+        sender:
+          type: string
+          enum: [operator, agent]
+        senderId:
+          type: string
+          nullable: true
+        recipient:
+          type: string
+          nullable: true
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        threadId:
+          type: string
+          nullable: true
+        mentions:
+          type: array
+          items:
+            type: string
+          nullable: true
+        reactions:
+          type: object
+          additionalProperties:
+            type: string
+            nullable: true
+        callSid:
+          type: string
+          nullable: true
+  # --- Call Signaling --------------------------------------------------------
+  # Voice call signaling: start/stop TTS, STT results, call state changes.
+  calls:
+    subscribe: websocket
+    publish: websocket
+    message:
+      payload:
+        callId:
+          type: string
+        type:
+          type: string
+          enum: [start, stop, speech, caption, end]
+        direction:
+          type: string
+          enum: [inbound, outbound]
+        text:
+          type: string
+          nullable: true
+        participant:
+          type: string
+          nullable: true
+  # --- Approvals -------------------------------------------------------------
+  # Approval requests from agents. The UI shows these in the approvals queue;
+  # the operator approves/denies, and the decision is sent back via commands.
+  approvals:
+    subscribe: websocket
+    publish: websocket
+    message:
+      payload:
+        approvalId:
+          type: string
+        action:
+          type: string
+        risk:
+          type: string
+          enum: [low, medium, high]
+        status:
+          type: string
+          enum: [pending, approved, denied, expired]
+        expiresAt:
+          type: string
+          format: date-time
+        requestedBy:
+          type: string
+          nullable: true
+components: {}

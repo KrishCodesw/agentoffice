@@ -1,0 +1,7 @@
+packages:
+  - '.'
+  - 'core'
+  - 'server'
+  - 'web'
+  - 'adapters/*'
+  - 'cli'
