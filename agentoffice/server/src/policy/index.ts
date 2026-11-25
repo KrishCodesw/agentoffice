@@ -84,7 +84,7 @@ export class PolicyEngine {
       for (const row of rows) {
         const approval: Approval = {
           ...row,
-          context: JSON.parse(row.context),
+          context: typeof row.context === 'string' ? JSON.parse(row.context) : row.context,
         }
         // Check if already expired
         if (new Date(approval.expiresAt) < new Date()) {
@@ -183,7 +183,7 @@ export class PolicyEngine {
         if (row) {
           const approval: Approval = {
             ...row,
-            context: JSON.parse(row.context),
+            context: typeof row.context === 'string' ? JSON.parse(row.context) : row.context,
           }
           this.approvals.set(approval.id, approval)
           return approval

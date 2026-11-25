@@ -10,10 +10,9 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "moduleResolution": "bundler",
-    "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "noEmit": false,
+    "noEmit": true,
     "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {

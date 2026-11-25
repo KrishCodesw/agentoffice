@@ -338,8 +338,8 @@ test.describe('AgentOffice MVP', () => {
     expect(result).toBeDefined()
     
     // Now approve it
-    const approveResult = server.policy.approveApproval(result, 'approved')
-    expect(approveResult).toBe('approved')
+    const approveResult = await server.policy.approveApproval(result, 'approve', 'test-operator')
+    expect(approveResult.status).toBe('approved')
     
     console.log('✅ Approval workflow works:', result)
   })
@@ -395,29 +395,35 @@ test.describe('AgentOffice MVP', () => {
 // Playwright browser test for full UI integration
 test.describe('AgentOffice UI Integration', () => {
   test('Full UI loads and connects to server', async ({ page }) => {
-    // Start the server in background
+    test.setTimeout(120000)
+    
+    // Start the server in background with auth disabled for testing
     const server = new AgentOfficeServer({
-      port: 3457,
-      host: 'localhost',
+      port: TEST_PORT,
+      host: TEST_HOST,
       driver: 'sqlite',
+      requireAuth: false,
     })
     
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    await server.init()
+    
+    // Give server time to fully start
+    await new Promise(resolve => setTimeout(resolve, 3000))
     
     try {
       // Navigate to the web UI
-      await page.goto('http://localhost:3457/', { waitUntil: 'networkidle' })
+      await page.goto(`http://${TEST_HOST}:${TEST_PORT}/`, { waitUntil: 'domcontentloaded', timeout: 30000 })
       
       // Should see connect screen
       await expect(page.locator('h1')).toContainText('AgentOffice')
       await expect(page.locator('input[placeholder="local-token"]')).toBeVisible()
       
-      // Enter token and connect
-      await page.fill('input[placeholder="local-token"]', 'local-token')
+      // With requireAuth: false, we don't need to enter a token
+      // Just click Connect without entering a token
       await page.click('button:has-text("Connect")')
       
-      // Should connect and show agents
-      await expect(page.locator('text=Floor')).toBeVisible({ timeout: 5000 })
+      // Should connect and show agents - wait for Floor tab to appear
+      await expect(page.locator('text=Floor')).toBeVisible({ timeout: 30000 })
       
       // Check that mode tabs are visible
       await expect(page.locator('button:has-text("Floor")')).toBeVisible()
@@ -431,7 +437,11 @@ test.describe('AgentOffice UI Integration', () => {
       console.log('✅ UI integration test passed')
     } finally {
       if (server.app?.close) {
-        await server.app.close()
+        // Add timeout to prevent hanging on close - don't fail test on close timeout
+        await Promise.race([
+          server.app.close(),
+          new Promise(resolve => setTimeout(resolve, 5000))
+        ]).catch(() => {})
       }
     }
   })

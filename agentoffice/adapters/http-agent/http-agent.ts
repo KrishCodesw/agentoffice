@@ -57,20 +57,19 @@ export class HttpAgentAdapter implements AgentAdapter {
 
   /** Start the HTTP agent: initialize HTTP server + WebSocket control channel */
   async connect(config: AdapterConfig): Promise<SessionHandle> {
-    const agentId = this.config.agentId
+    // Use the passed-in config, not just the constructor config
+    const agentId = config.agentId ?? this.config.agentId
+    const name = config.name ?? this.config.name
 
     // Start HTTP server for the agent's HTTP endpoint
-    this.startHttpServer()
+    await this.startHttpServer()
 
     // Start WebSocket server for the control channel
-    this.startWsServer()
-
-    // Small delay to ensure servers are up
-    await new Promise((resolve) => setTimeout(resolve, 500))
+    await this.startWsServer()
 
     this.session = {
       id: agentId,
-      label: this.config.name || 'HTTP Agent',
+      label: name || 'HTTP Agent',
       capabilities: this.capabilities,
       state: 'working',
     }
@@ -152,7 +151,7 @@ export class HttpAgentAdapter implements AgentAdapter {
       case 'stop':
         this.session!.state = 'offline'
         // Clean up servers
-        this.stopServers()
+        await this.stopServers()
         return 'accepted'
       case 'approve':
         this.session!.state = 'working'
@@ -168,7 +167,7 @@ export class HttpAgentAdapter implements AgentAdapter {
   /** Close the agent session and clean up servers */
   async close(session: SessionHandle): Promise<void> {
     this.session = null
-    this.stopServers()
+    await this.stopServers()
   }
 
   /** Broadcast to all connected WebSocket clients */
@@ -181,20 +180,24 @@ export class HttpAgentAdapter implements AgentAdapter {
     }
   }
 
-  /** Start the HTTP server for this agent */
-  private startHttpServer(): void {
-    this.httpServer = http.createServer((req, res) => {
-      res.writeHead(200, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({
-        agentId: this.config.agentId,
-        status: this.session?.state || 'starting',
-        url: this.config.bindUrl,
-      }))
-    })
+  /** Start the HTTP server for this agent. Resolves when the server is listening. */
+  private async startHttpServer(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.httpServer = http.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          agentId: this.config.agentId,
+          status: this.session?.state || 'starting',
+          url: this.config.bindUrl,
+        }))
+      })
 
-    const [host, port] = this.config.bindUrl.split(':')
-    this.httpServer.listen(parseInt(port || '3000', 10), host || 'localhost', () => {
-      console.log(`[http-agent] HTTP server listening on ${this.config.bindUrl}`)
+      const [host, port] = this.config.bindUrl.split(':')
+      this.httpServer.listen(parseInt(port || '3000', 10), host || 'localhost', () => {
+        console.log(`[http-agent] HTTP server listening on ${this.config.bindUrl}`)
+        resolve()
+      })
+      this.httpServer.on('error', reject)
     })
   }
 
@@ -236,17 +239,24 @@ export class HttpAgentAdapter implements AgentAdapter {
     })
   }
 
-  /** Stop both HTTP and WebSocket servers */
-  private stopServers(): void {
-    if (this.httpServer) {
-      this.httpServer.close()
+  /** Stop both HTTP and WebSocket servers. Awaits full closure. */
+  private async stopServers(): Promise<void> {
+    const stopHttp = this.httpServer ? new Promise<void>((resolve) => {
+      this.httpServer!.close(() => {
+        console.log(`[http-agent] HTTP server closed for ${this.config.agentId}`)
+        resolve()
+      })
       this.httpServer = null
-      console.log(`[http-agent] HTTP server closed for ${this.config.agentId}`)
-    }
-    if (this.wsServer) {
-      this.wsServer.close()
+    }) : Promise.resolve()
+
+    const stopWs = this.wsServer ? new Promise<void>((resolve) => {
+      this.wsServer!.close(() => {
+        console.log(`[http-agent] WebSocket server closed for ${this.config.agentId}`)
+        resolve()
+      })
       this.wsServer = null
-      console.log(`[http-agent] WebSocket server closed for ${this.config.agentId}`)
-    }
+    }) : Promise.resolve()
+
+    await Promise.all([stopHttp, stopWs])
   }
 }

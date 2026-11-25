@@ -8,12 +8,12 @@
     "agentoffice": "./cli/index.ts"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "playwright test tests/e2e",
     "dev": "concurrently \"pnpm run dev:server\" \"pnpm run dev:web\"",
     "dev:server": "tsx watch server/src/app.ts",
-    "dev:web": "vite --host",
+    "dev:web": "cd web && vite --host",
     "build": "pnpm run build:web && pnpm run build:server",
-    "build:web": "vite build --config web/vite.config.ts",
+    "build:web": "cd web && vite build",
     "build:server": "tsc -p server/tsconfig.json",
     "start": "node cli/index.ts"
   },

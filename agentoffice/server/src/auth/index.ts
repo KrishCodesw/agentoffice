@@ -73,14 +73,10 @@ export class OperatorAuth {
 
     // Check if setup is complete
     if (!(await this.isSetupComplete())) {
-      // No token set yet - reject in production, allow in dev only if explicitly configured
-      if (process.env.NODE_ENV !== 'development') {
-        return false
-      }
-      // Development: allow but warn
-      console.warn('WARNING: No operator token configured. Using development fallback.')
-      await this.performInitialSetup(token, 'local-dev')
-      return true
+      // No token set yet. Reject - setup must be completed explicitly
+      // through performInitialSetup before any client can connect.
+      console.log(`Socket rejected: initial setup not complete`)
+      return false
     }
 
     // Check if it matches the stored operator token

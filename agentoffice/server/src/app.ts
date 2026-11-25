@@ -21,6 +21,8 @@ import { CallManagerImpl } from './calls'
 import { AuditLog } from './audit'
 import { SqliteStore } from './store'
 import { OperatorAuth } from './auth'
+import { AdapterRegistry } from './adapters/adapter-registry'
+import { registerMockAdapters } from './composition/mock-adapters'
 import path from 'path'
 import { fileURLToPath } from 'url'
 
@@ -29,6 +31,8 @@ import type { AgentAdapter, Capability, SessionHandle, AgentEvent, Command, Comm
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
+console.log('[BOOT] Starting AgentOffice server load...')
 
 export interface ServerConfig {
   port: number
@@ -58,11 +62,14 @@ export class AgentOfficeServer {
   public httpServer!: HttpServer
 
   private adapters: Map<string, AgentAdapter> = new Map()
+  private adapterRegistry: AdapterRegistry
   private pendingCommands: Map<string, { resolve: (v: CommandResult) => void; reject: (e: Error) => void; timeout: NodeJS.Timeout }> = new Map()
   private config: ServerConfig
 
   constructor(config: ServerConfig) {
     this.config = config
+    this.adapterRegistry = new AdapterRegistry()
+    registerMockAdapters(this.adapterRegistry)
     // Default to localhost only for security
     const safeHost = config.host === '0.0.0.0' ? '127.0.0.1' : config.host
     const allowedOrigins = config.allowedOrigins ?? [`http://${safeHost}:${config.port}`, `http://${safeHost}:5173`, `http://${safeHost}:5174`, `http://${safeHost}:5175`]
@@ -169,22 +176,27 @@ export class AgentOfficeServer {
   }
 
   private async _registerAdapters() {
-    // Register adapters - in production, this would be config-driven
+    // Register adapters through the config-driven adapter registry.
+    // The server never imports a specific vendor adapter directly.
     const mockAgents = [
       { id: 'mock-1', name: 'Claude', shouldNeedApproval: true },
       { id: 'mock-2', name: 'GPT-4' },
       { id: 'mock-3', name: 'CLI', shouldError: true },
     ]
 
-    const { MockAdapter } = await import('./adapters/mock-adapter')
-
     for (const agentConfig of mockAgents) {
-      const adapter = new MockAdapter({
+      const adapter = this.adapterRegistry.create('mock', {
         agentId: agentConfig.id,
         name: agentConfig.name,
-        shouldNeedApproval: agentConfig.shouldNeedApproval,
-        shouldError: agentConfig.shouldError,
+        options: {
+          shouldNeedApproval: agentConfig.shouldNeedApproval,
+          shouldError: agentConfig.shouldError,
+        },
       })
+      if (!adapter) {
+        console.error(`No adapter registered for id 'mock'`)
+        continue
+      }
       this.adapters.set(agentConfig.id, adapter)
       this.registry.registerAdapter(agentConfig.id, adapter)
     }
@@ -195,7 +207,7 @@ export class AgentOfficeServer {
     this.registry.onConnect((agentId: string, handle: SessionHandle) => {
       this.bus.publish('agent-connect', { agentId, handle })
       this.io.emit('agent-connect', agentId, handle)
-      
+
       // Start the agent's event stream
       this._startAgentEventStream(agentId, handle)
     })
@@ -335,16 +347,26 @@ export class AgentOfficeServer {
   }
 }
 
-// Main entry point (only runs when executed directly, not when imported)
-if (import.meta.url === `file://${process.argv[1]}`) {
-const config: ServerConfig = {
-  port: parseInt(process.env.PORT || '3001'),
-  host: process.env.HOST || '127.0.0.1', // Default to localhost
-  driver: (process.env.DRIVER as 'sqlite' | 'postgres') || 'sqlite',
-  allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') ?? undefined,
-  requireAuth: process.env.REQUIRE_AUTH !== 'false',
-}
+// Main entry point - Standard ES module pattern
+const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`
 
-const server = new AgentOfficeServer(config)
-await server.init()
+if (isMain) {
+  console.log('[BOOT] Starting AgentOffice server load...')
+
+  const config: ServerConfig = {
+    port: parseInt(process.env.PORT || '3001'),
+    host: process.env.HOST || '127.0.0.1', // Default to localhost
+    driver: (process.env.DRIVER as 'sqlite' | 'postgres') || 'sqlite',
+    allowedOrigins: process.env.ALLOWED_ORIGINS?.split(',') ?? undefined,
+    requireAuth: process.env.REQUIRE_AUTH !== 'false',
+  }
+
+  console.log('[AgentOffice] Config:', config)
+  console.log('[AgentOffice] import.meta.url:', import.meta.url)
+  console.log('[AgentOffice] process.argv:', process.argv)
+
+  const server = new AgentOfficeServer(config)
+  console.log('[AgentOffice] Server instance created, calling init...')
+  await server.init()
+  console.log('[AgentOffice] Server init complete')
 }
