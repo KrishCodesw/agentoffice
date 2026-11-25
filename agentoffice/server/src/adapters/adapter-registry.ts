@@ -14,7 +14,7 @@ import type {
   SessionHandle,
 } from '@agentoffice/core'
 
-export type AdapterFactory = (config: AdapterConfig) => AgentAdapter
+export type AdapterFactory = (config: AdapterConfig) => AgentAdapter | Promise<AgentAdapter>
 
 export class AdapterRegistry {
   private factories: Map<string, AdapterFactory> = new Map()
@@ -25,7 +25,7 @@ export class AdapterRegistry {
   }
 
   /** Create an adapter instance for the given ID and config. */
-  create(id: string, config: AdapterConfig): AgentAdapter | undefined {
+  async create(id: string, config: AdapterConfig): Promise<AgentAdapter | undefined> {
     const factory = this.factories.get(id)
     if (!factory) return undefined
     return factory(config)

@@ -24,6 +24,8 @@ export interface RegistryEvents {
   agentDisconnect: (agentId: string) => void
   /** Fired when an agent's presence state changes */
   agentStateChange: (agentId: string, state: SessionHandle['state']) => void
+  /** Fired when the kill switch is activated or deactivated */
+  killSwitchChange: (active: boolean, triggeredBy: string) => void
 }
 
 export type AgentState = {
@@ -38,12 +40,15 @@ export class Registry {
   private sessions: Map<string, SessionHandle> = new Map() // agentId -> session handle
   private events: RegistryEvents
   private offlineTimeouts: Map<string, NodeJS.Timeout> = new Map()
+  private killSwitchActive = false
+  private killSwitchTriggeredBy = ''
 
   constructor(app: any) {
     this.events = {
       agentConnect: () => {},
       agentDisconnect: () => {},
       agentStateChange: () => {},
+      killSwitchChange: () => {},
     }
   }
 
@@ -103,6 +108,56 @@ export class Registry {
       state: handle.state,
       label: handle.label,
     }))
+  }
+
+  /** Check if the kill switch is currently active. */
+  isKillSwitchActive(): boolean {
+    return this.killSwitchActive
+  }
+
+  /** Get who triggered the kill switch. */
+  getKillSwitchTriggeredBy(): string {
+    return this.killSwitchTriggeredBy
+  }
+
+  /**
+   * Activate the kill switch - stop all adapters and mark every agent offline.
+   * Returns the list of agent IDs that were stopped.
+   */
+  async activateKillSwitch(triggeredBy: string = 'operator'): Promise<string[]> {
+    if (this.killSwitchActive) {
+      console.log(`[registry] Kill switch already active (triggered by ${this.killSwitchTriggeredBy})`)
+      return []
+    }
+    this.killSwitchActive = true
+    this.killSwitchTriggeredBy = triggeredBy
+    const stopped: string[] = []
+
+    for (const [agentId, adapter] of this.adapts) {
+      const handle = this.sessions.get(agentId)
+      if (!handle) continue
+
+      try {
+        await adapter.close(handle)
+        stopped.push(agentId)
+      } catch (err) {
+        console.error(`[registry] Kill switch: failed to stop ${agentId}:`, err)
+      }
+
+      handle.state = 'offline'
+      this.sessions.delete(agentId)
+      this.events.agentDisconnect(agentId)
+    }
+
+    this.events.killSwitchChange(true, triggeredBy)
+    return stopped
+  }
+
+  /** Deactivate the kill switch, allowing new agents to connect. */
+  deactivateKillSwitch(triggeredBy: string = 'operator'): void {
+    this.killSwitchActive = false
+    this.killSwitchTriggeredBy = ''
+    this.events.killSwitchChange(false, triggeredBy)
   }
 
   /** Set the events handler (called from app.ts) */

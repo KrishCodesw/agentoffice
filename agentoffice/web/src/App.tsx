@@ -31,6 +31,8 @@ export function App() {
   const [mode, setMode] = useState<'connect' | 'floor' | 'chat' | 'call' | 'control'>('connect')
   const [operatorToken, setOperatorToken] = useState<string>('')
   const [selectedAgentId, setSelectedAgentId] = useState<string>('mock-1')
+  const [approvals, setApprovals] = useState<Array<{id: string, action: string, risk: string, requestedBy: string, status: string, expiresAt: string, createdAt: string, context: any}>>([])
+  const [budgets, setBudgets] = useState<Record<string, {used: number, limit: number, remaining: number, withinBudget: boolean}>>({})
 
   // Connect to the server via Socket.IO
   const connectToServer = () => {
@@ -51,6 +53,10 @@ export function App() {
       setSocket(sock)
       setServerside(true)
       console.log('Connected to server via Socket.IO')
+
+      // Request initial data for Control Room
+      sock.emit('get-approvals')
+      sock.emit('get-budgets')
     })
 
     sock.on('agent-connect', (agentId: string, handle: any) => {
@@ -87,8 +93,60 @@ export function App() {
       console.log('✅ Socket.IO: approval-approved', payload.approvalId)
     })
 
+    // Real-time approval event (new approval created)
+    sock.on('approvals', (payload: any) => {
+      if (payload.status === 'pending') {
+        setApprovals((prev) => [...prev, {
+          id: payload.approvalId,
+          action: payload.action,
+          risk: payload.risk,
+          requestedBy: payload.requestedBy || payload.agentId,
+          status: payload.status,
+          expiresAt: payload.expiresAt,
+          createdAt: new Date().toISOString(),
+          context: payload.context,
+        }])
+      }
+    })
+
+    // Approval approved/denied - update local state
+    sock.on('approval-approved', (payload: any) => {
+      console.log('✅ Socket.IO: approval-approved', payload.approvalId)
+      setApprovals((prev) => prev.map(a => a.id === payload.approvalId ? { ...a, status: 'approved' } : a))
+    })
+
     sock.on('approval-denied', (payload: any) => {
       console.log('❌ Socket.IO: approval-denied', payload.approvalId)
+      setApprovals((prev) => prev.map(a => a.id === payload.approvalId ? { ...a, status: 'denied' } : a))
+    })
+
+    // Budgets list query response
+    sock.on('budgets-list', (payload: Record<string, any>) => {
+      setBudgets(payload)
+    })
+
+    // Budget exceeded event
+    sock.on('budget-exceeded', (payload: any) => {
+      console.log('⚠️ Budget exceeded for agent', payload.agentId)
+      setBudgets((prev) => ({ ...prev, [payload.agentId]: { ...prev[payload.agentId], withinBudget: false } }))
+      setAgents((prev) => prev.map(a => a.id === payload.agentId ? { ...a, state: 'paused' as Agent['state'] } : a))
+    })
+
+    // Usage event - update budget
+    sock.on('usage', (payload: any) => {
+      if (payload.budget) {
+        setBudgets((prev) => ({ ...prev, [payload.agentId]: payload.budget }))
+      }
+    })
+
+    // Kill switch events
+    sock.on('kill-switch-activated', (payload: any) => {
+      console.log('🛑 Kill switch activated', payload)
+      setAgents((prev) => prev.map(a => ({ ...a, state: 'offline' as Agent['state'] })))
+    })
+
+    sock.on('kill-switch-deactivated', (payload: any) => {
+      console.log('✅ Kill switch deactivated', payload)
     })
 
     setSocket(sock)
@@ -111,15 +169,18 @@ export function App() {
     socket?.emit('approvals', { approvalId, decide })
   }
 
-  // Kill switch - stop all agents
-  const handleKillSwitch = () => {
+  // Bulk action - pause/resume/stop selected agents
+  const handleBulkAction = (action: 'pause' | 'resume' | 'stop', agentIds: string[]) => {
     if (!socket) return
-    // Send stop command to all agents
-    agents.forEach(agent => {
-      if (agent.state !== 'offline') {
-        socket.emit('commands', { agentId: agent.id, command: { type: 'stop' } })
-      }
+    agentIds.forEach((agentId) => {
+      socket.emit('commands', { agentId, command: { type: action } })
     })
+  }
+
+  // Kill switch - stop all agents immediately via server
+  const handleKillSwitch = (activate: boolean) => {
+    if (!socket) return
+    socket.emit('kill-switch', { activate, reason: 'Manual kill switch from Control Room' })
   }
 
   if (!serverside || !socket) {
@@ -247,7 +308,16 @@ export function App() {
       {mode === 'floor' && <FloorMode agents={agents} onCommand={sendCommand} />}
       {mode === 'chat' && <ChatMode agents={agents} onCommand={sendCommand} />}
       {mode === 'call' && <CallMode agents={agents} onCommand={sendCommand} />}
-      {mode === 'control' && <ControlMode agents={agents} onApproval={handleApproval} onKillSwitch={handleKillSwitch} />}
+      {mode === 'control' && (
+        <ControlMode
+          agents={agents}
+          approvals={approvals}
+          budgets={budgets}
+          onApproval={handleApproval}
+          onKillSwitch={handleKillSwitch}
+          onBulkAction={handleBulkAction}
+        />
+      )}
     </div>
   )
 }

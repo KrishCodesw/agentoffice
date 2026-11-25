@@ -17,7 +17,7 @@
 
 import { AgentAdapter, Capability, SessionHandle, AgentEvent, Command, CommandResult, AdapterConfig } from '@agentoffice/core'
 import http from 'http'
-import { WebSocketServer } from 'ws'
+import { WebSocketServer, WebSocket } from 'ws'
 
 /**
  * HTTP Agent Config

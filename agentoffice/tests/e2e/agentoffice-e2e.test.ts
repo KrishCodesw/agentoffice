@@ -22,6 +22,9 @@ async function setupServerAndAgents(): Promise<{
   httpAdapter: HttpAgentAdapter
   claudeAdapter: ClaudeAgentSDKAdapter
 }> {
+  // Prevent auto-registration of agents; test registers its own
+  process.env.AGENTOFFICE_AGENTS = '[]'
+
   const server = new AgentOfficeServer({
     port: TEST_PORT,
     host: TEST_HOST,

@@ -104,7 +104,9 @@ function startServer(options: CLIOptions): ReturnType<typeof spawn> {
   console.log(`🚀 Starting AgentOffice server on ${options.host}:${options.port} (${isDev ? 'dev' : 'prod'})...`)
 
   // Use tsx to run the server (handles TS and directory imports)
-  const child = spawn('npx', ['tsx', 'watch', serverPath], {
+  // Dev mode uses watch for hot reload; prod mode runs once
+  const tsxArgs = isDev ? ['watch', serverPath] : [serverPath]
+  const child = spawn('npx', ['tsx', ...tsxArgs], {
     env: {
       ...process.env,
       PORT: String(options.port),

@@ -82,7 +82,6 @@ export class MockAdapter implements AgentAdapter {
     }
 
     // Reset event index so the event stream always starts from the beginning
-    this.eventIndex = 0
 
     return this.session
   }

@@ -319,6 +319,46 @@ export class PolicyEngine {
     return Array.from(this.approvals.values()).filter(a => a.status === 'pending')
   }
 
+  /** Get budget status for an agent. */
+  getBudgetStatus(agentId: string): { used: number; limit: number; remaining: number; withinBudget: boolean } {
+    const record = this.budgets.get(agentId)
+    if (!record) {
+      return {
+        used: 0,
+        limit: this.config.hourlyBudgetUsd ?? PolicyEngine.getDefaultConfig().hourlyBudgetUsd,
+        remaining: this.config.hourlyBudgetUsd ?? PolicyEngine.getDefaultConfig().hourlyBudgetUsd,
+        withinBudget: true,
+      }
+    }
+
+    const now = new Date()
+    if (now > record.resetAt) {
+      return {
+        used: 0,
+        limit: this.config.hourlyBudgetUsd ?? PolicyEngine.getDefaultConfig().hourlyBudgetUsd,
+        remaining: this.config.hourlyBudgetUsd ?? PolicyEngine.getDefaultConfig().hourlyBudgetUsd,
+        withinBudget: true,
+      }
+    }
+
+    const limit = this.config.hourlyBudgetUsd ?? PolicyEngine.getDefaultConfig().hourlyBudgetUsd
+    return {
+      used: record.used,
+      limit,
+      remaining: limit - record.used,
+      withinBudget: record.used <= limit,
+    }
+  }
+
+  /** Get budget status for all agents. */
+  getAllBudgets(): Map<string, { used: number; limit: number; remaining: number; withinBudget: boolean }> {
+    const result = new Map<string, { used: number; limit: number; remaining: number; withinBudget: boolean }>()
+    for (const agentId of this.budgets.keys()) {
+      result.set(agentId, this.getBudgetStatus(agentId))
+    }
+    return result
+  }
+
   /** Get approval by ID (any status). */
   async getApproval(approvalId: string): Promise<Approval | undefined> {
     return this.getPendingApproval(approvalId)
