@@ -18,6 +18,15 @@ interface ControlModeProps {
     context: any
   }>
   budgets: Record<string, { used: number; limit: number; remaining: number; withinBudget: boolean }>
+  auditLog: Array<{
+    id: string
+    timestamp: string
+    action: string
+    agentId: string | null
+    details: any
+    result: string
+    sessionId: string | null
+  }>
   onApproval: (approvalId: string, decide: 'approve' | 'deny') => void
   onKillSwitch: (activate: boolean) => void
   onBulkAction: (action: 'pause' | 'resume' | 'stop', agentIds: string[]) => void
@@ -27,6 +36,7 @@ export default function ControlMode({
   agents,
   approvals,
   budgets,
+  auditLog,
   onApproval,
   onKillSwitch,
   onBulkAction,
@@ -246,6 +256,43 @@ export default function ControlMode({
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+
+        {/* Audit log */}
+        <div>
+          <h3 style={{ margin: '0 0 0.5rem', fontSize: '1rem' }}>Audit Log (last {Math.min(auditLog.length, 20)})</h3>
+          {auditLog.length === 0 ? (
+            <p style={{ color: '#999', textAlign: 'center', marginTop: '2rem' }}>
+              No audit entries
+            </p>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem' }}>
+              <thead>
+                <tr style={{ textAlign: 'left', borderBottom: '2px solid #e0e0e0' }}>
+                  <th style={{ padding: '0.5rem', color: '#666' }}>Time</th>
+                  <th style={{ padding: '0.5rem', color: '#666' }}>Action</th>
+                  <th style={{ padding: '0.5rem', color: '#666' }}>Agent</th>
+                  <th style={{ padding: '0.5rem', color: '#666' }}>Result</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auditLog.slice(-20).reverse().map((e) => (
+                  <tr key={e.id} style={{ borderBottom: '1px solid #f0f0f0' }}>
+                    <td style={{ padding: '0.5rem', color: '#666', fontSize: '0.75rem' }}>
+                      {new Date(e.timestamp).toLocaleTimeString()}
+                    </td>
+                    <td style={{ padding: '0.5rem', fontSize: '0.75rem' }}>{e.action}</td>
+                    <td style={{ padding: '0.5rem', fontSize: '0.75rem', color: '#666' }}>
+                      {e.agentId || 'system'}
+                    </td>
+                    <td style={{ padding: '0.5rem', fontSize: '0.75rem', fontWeight: 600, color: e.result === 'accepted' || e.result === 'approved' ? '#2e7d32' : e.result === 'rejected' || e.result === 'denied' ? '#c62828' : '#666' }}>
+                      {e.result}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </div>
       </div>

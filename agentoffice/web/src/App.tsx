@@ -33,6 +33,7 @@ export function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('mock-1')
   const [approvals, setApprovals] = useState<Array<{id: string, action: string, risk: string, requestedBy: string, status: string, expiresAt: string, createdAt: string, context: any}>>([])
   const [budgets, setBudgets] = useState<Record<string, {used: number, limit: number, remaining: number, withinBudget: boolean}>>({})
+  const [auditLog, setAuditLog] = useState<Array<{id: string, timestamp: string, action: string, agentId: string | null, details: any, result: string, sessionId: string | null}>>([])
 
   // Connect to the server via Socket.IO
   const connectToServer = () => {
@@ -54,9 +55,10 @@ export function App() {
       setServerside(true)
       console.log('Connected to server via Socket.IO')
 
-      // Request initial data for Control Room
-      sock.emit('get-approvals')
-      sock.emit('get-budgets')
+    // Request initial data for Control Room
+    sock.emit('get-approvals')
+    sock.emit('get-budgets')
+    sock.emit('get-audit-log')
     })
 
     sock.on('agent-connect', (agentId: string, handle: any) => {
@@ -123,6 +125,11 @@ export function App() {
     // Budgets list query response
     sock.on('budgets-list', (payload: Record<string, any>) => {
       setBudgets(payload)
+    })
+
+    // Audit log list query response
+    sock.on('audit-log-list', (payload: any[]) => {
+      setAuditLog(payload)
     })
 
     // Budget exceeded event
@@ -313,6 +320,7 @@ export function App() {
           agents={agents}
           approvals={approvals}
           budgets={budgets}
+          auditLog={auditLog}
           onApproval={handleApproval}
           onKillSwitch={handleKillSwitch}
           onBulkAction={handleBulkAction}

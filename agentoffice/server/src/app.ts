@@ -25,6 +25,9 @@ import { AdapterRegistry } from './adapters/adapter-registry'
 import { registerMockAdapters } from './composition/mock-adapters'
 import { registerHttpAdapters } from './composition/http-adapters'
 import { registerClaudeSDKAdapters } from './composition/claude-sdk-adapters'
+import { registerCliProcessAdapters } from './composition/cli-process-adapters'
+import { registerClaudeCodeAdapters } from './composition/claude-code-adapters'
+import { registerOpenAIAgentsAdapters } from './composition/openai-agents-adapters'
 import path from 'path'
 import { fileURLToPath, pathToFileURL } from 'url'
 
@@ -82,6 +85,9 @@ export class AgentOfficeServer {
     registerMockAdapters(this.adapterRegistry)
     registerHttpAdapters(this.adapterRegistry)
     registerClaudeSDKAdapters(this.adapterRegistry)
+    registerCliProcessAdapters(this.adapterRegistry)
+    registerClaudeCodeAdapters(this.adapterRegistry)
+    registerOpenAIAgentsAdapters(this.adapterRegistry)
     // Default to localhost only for security
     const safeHost = config.host === '0.0.0.0' ? '127.0.0.1' : config.host
     const allowedOrigins = config.allowedOrigins ?? [`http://${safeHost}:${config.port}`, `http://${safeHost}:5173`, `http://${safeHost}:5174`, `http://${safeHost}:5175`]
@@ -411,7 +417,7 @@ export class AgentOfficeServer {
           // Audit log
           this.audit.log({
             action: 'kill-switch',
-            agentId: undefined,
+            agentId: null,
             details: { activate: true, reason, stopped },
             result: 'accepted',
             sessionId: null,
@@ -428,7 +434,7 @@ export class AgentOfficeServer {
           // Audit log
           this.audit.log({
             action: 'kill-switch',
-            agentId: undefined,
+            agentId: null,
             details: { activate: false, reason },
             result: 'accepted',
             sessionId: null,
