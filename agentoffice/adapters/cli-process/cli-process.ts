@@ -120,7 +120,7 @@ export class CliProcessAdapter implements AgentAdapter {
       setTimeout(() => {
         if (this.eventResolve === resolve) {
           this.eventResolve = null
-          resolve({ type: 'status', state: 'working' })
+          resolve({ type: 'status', state: 'working' as const })
         }
       }, 30000)
     })
@@ -129,7 +129,7 @@ export class CliProcessAdapter implements AgentAdapter {
       id: config.agentId,
       label: config.name || `CLI: ${cmd}`,
       capabilities: this.capabilities,
-      state: readyEvent.state || 'working',
+      state: (readyEvent.type === 'status' ? readyEvent.state : 'working'),
     }
 
     return this.session
@@ -153,8 +153,21 @@ export class CliProcessAdapter implements AgentAdapter {
       return 'rejected'
     }
 
-    // Send command to stdin
-    const commandJson = JSON.stringify({ type: cmd.type, ...(cmd.text !== undefined ? { text: cmd.text } : {}), ...(cmd.approvalId !== undefined ? { approvalId: cmd.approvalId } : {}), ...(cmd.reason !== undefined ? { reason: cmd.reason } : {}), ...(cmd.on !== undefined ? { on: cmd.on } : {}) })
+    // Build command payload for stdin
+    const payload: Record<string, unknown> = { type: cmd.type }
+    if ((cmd as { text?: string }).text !== undefined) {
+      payload.text = (cmd as { text?: string }).text
+    }
+    if ((cmd as { approvalId?: string }).approvalId !== undefined) {
+      payload.approvalId = (cmd as { approvalId?: string }).approvalId
+    }
+    if ((cmd as { reason?: string }).reason !== undefined) {
+      payload.reason = (cmd as { reason?: string }).reason
+    }
+    if ((cmd as { on?: boolean }).on !== undefined) {
+      payload.on = (cmd as { on?: boolean }).on
+    }
+    const commandJson = JSON.stringify(payload)
 
     if (this.process.stdin && !this.process.stdin.destroyed) {
       this.process.stdin.write(commandJson + '\n')
@@ -225,9 +238,9 @@ export class CliProcessAdapter implements AgentAdapter {
         // Create a pending approval that the office can resolve
         const event: AgentEvent = {
           type: 'needs_approval',
-          approvalId: parsed.approvalId,
-          action: parsed.action || 'unknown action',
-          risk: parsed.risk || 'medium',
+          approvalId: String(parsed.approvalId),
+          action: String(parsed.action || 'unknown action'),
+          risk: (parsed.risk as 'low' | 'medium' | 'high') || 'medium',
         }
         this.enqueueEvent(event)
         return
@@ -235,32 +248,60 @@ export class CliProcessAdapter implements AgentAdapter {
 
       if (parsed.type === 'approval_decision' && parsed.approvalId) {
         // Process is responding to an approval we sent via command
-        const pending = this.pendingApprovals.get(parsed.approvalId)
+        const pending = this.pendingApprovals.get(String(parsed.approvalId))
         if (pending) {
           if (parsed.decision === 'allow') {
             pending.resolve('allow')
           } else {
             pending.reject(new Error('Denied by process'))
           }
-          this.pendingApprovals.delete(parsed.approvalId)
+          this.pendingApprovals.delete(String(parsed.approvalId))
         }
         return
       }
 
-      // Regular event
-      const event: AgentEvent = {
-        type: parsed.type,
-        ...(parsed.state !== undefined ? { state: parsed.state } : {}),
-        ...(parsed.text !== undefined ? { text: parsed.text } : {}),
-        ...(parsed.tool !== undefined ? { tool: parsed.tool, summary: parsed.summary || '' } : {}),
-        ...(parsed.approvalId !== undefined ? { approvalId: parsed.approvalId, action: parsed.action || '', risk: parsed.risk || 'medium' } : {}),
-        ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens, costUsd: parsed.costUsd } : {}),
-        ...(parsed.toAgentId !== undefined ? { toAgentId: parsed.toAgentId, task: parsed.task || '', artifacts: parsed.artifacts || [] } : {}),
-      }
+      // Regular event - build with proper typing
+      const event: AgentEvent = this._buildEvent(parsed)
       this.enqueueEvent(event)
     } catch {
       // Not JSON - treat as raw output
       this.enqueueEvent({ type: 'output', text: trimmed })
+    }
+  }
+
+  private _buildEvent(parsed: any): AgentEvent {
+    const type = parsed.type
+
+    switch (type) {
+      case 'status':
+        return { type: 'status', state: (parsed.state as 'working' | 'idle' | 'paused' | 'error' | 'offline') }
+      case 'output':
+        return { type: 'output', text: String(parsed.text || '') }
+      case 'tool_call':
+        return { type: 'tool_call', tool: String(parsed.tool || ''), summary: String(parsed.summary || '') }
+      case 'needs_approval':
+        return {
+          type: 'needs_approval',
+          approvalId: String(parsed.approvalId || ''),
+          action: String(parsed.action || ''),
+          risk: (parsed.risk as 'low' | 'medium' | 'high') || 'medium',
+        }
+      case 'usage':
+        return {
+          type: 'usage',
+          inputTokens: Number(parsed.inputTokens || 0),
+          outputTokens: Number(parsed.outputTokens || 0),
+          costUsd: Number(parsed.costUsd || 0),
+        }
+      case 'handoff':
+        return {
+          type: 'handoff',
+          toAgentId: String(parsed.toAgentId || ''),
+          task: String(parsed.task || ''),
+          artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
+        }
+      default:
+        return { type: 'output', text: String(parsed.text || JSON.stringify(parsed)) }
     }
   }
 

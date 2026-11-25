@@ -8,7 +8,20 @@
  * Layering: depends on core only. Vendor import is lazy (dynamic import).
  */
 
+/**
+ * OpenAI Agents Adapter - Wraps the OpenAI Agents SDK (`@openai/agents`).
+ *
+ * Bridges the OpenAI Agents SDK run loop to AgentOffice events and commands.
+ *
+ * Requires `@openai/agents` to be installed.
+ *
+ * Layering: depends on core only. Vendor import is lazy (dynamic import).
+ */
+
 import { AgentAdapter, Capability, SessionHandle, AgentEvent, Command, CommandResult, AdapterConfig } from '@agentoffice/core'
+import { createRequire } from 'module'
+
+const require = createRequire(import.meta.url)
 
 export type OpenAIAgentsConfig = {
   /** OpenAI API key */
@@ -50,8 +63,7 @@ export class OpenAIAgentsAdapter implements AgentAdapter {
   async connect(config: AdapterConfig): Promise<SessionHandle> {
     // Lazy-load the OpenAI Agents SDK
     try {
-      // Dynamic import - will fail if @openai/agents is not installed
-      this.sdk = await import('@openai/agents')
+      this.sdk = Promise.resolve(require('@openai/agents'))
     } catch {
       throw new Error(
         '@openai/agents is not installed. Install it with: pnpm add @openai/agents ' +

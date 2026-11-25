@@ -54,12 +54,15 @@ export class ClaudeCodeAdapter implements AgentAdapter {
 
   async connect(config: AdapterConfig): Promise<SessionHandle> {
     // Check if `claude` CLI is available
-    const args = [
-      ...(this.config.model ? ['--model', this.config.model] : []),
-      ...(this.config.maxTurns ? ['--max-turns', String(this.config.maxTurns)] : []),
-      ...(this.config.permissionMode ? ['--permission-mode', this.config.permissionMode] : []),
-      ...(this.config.additionalDirectories?.flatMap((d) => ['--additional-directory', d]) || []),
-    ]
+    const args: string[] = []
+    if (this.config.model) args.push('--model', this.config.model)
+    if (this.config.maxTurns) args.push('--max-turns', String(this.config.maxTurns))
+    if (this.config.permissionMode) args.push('--permission-mode', this.config.permissionMode)
+    if (this.config.additionalDirectories) {
+      for (const d of this.config.additionalDirectories) {
+        args.push('--additional-directory', d)
+      }
+    }
 
     this.process = spawn('claude', args, {
       cwd: this.config.cwd || process.cwd(),
@@ -140,7 +143,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       case 'send':
         // Send message to Claude Code via stdin
         if (this.process.stdin && !this.process.stdin.destroyed) {
-          this.process.stdin.write(JSON.stringify({ type: 'user_message', text: cmd.text }) + '\n')
+          this.process.stdin.write(JSON.stringify({ type: 'user_message', text: (cmd as { text: string }).text }) + '\n')
         }
         return 'accepted'
 
@@ -171,7 +174,7 @@ export class ClaudeCodeAdapter implements AgentAdapter {
         return 'accepted'
 
       case 'takeover':
-        if (cmd.on) {
+        if ((cmd as { on: boolean }).on) {
           if (this.process.stdin && !this.process.stdin.destroyed) {
             this.process.stdin.write(JSON.stringify({ type: 'interrupt' }) + '\n')
           }
@@ -220,39 +223,67 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       if (parsed.type === 'needs_approval' && parsed.approvalId) {
         const event: AgentEvent = {
           type: 'needs_approval',
-          approvalId: parsed.approvalId,
-          action: parsed.action || 'unknown action',
-          risk: parsed.risk || 'medium',
+          approvalId: String(parsed.approvalId),
+          action: String(parsed.action || 'unknown action'),
+          risk: (parsed.risk as 'low' | 'medium' | 'high') || 'medium',
         }
         this.enqueueEvent(event)
         return
       }
 
       if (parsed.type === 'approval_decision' && parsed.approvalId) {
-        const pending = this.pendingApprovals.get(parsed.approvalId)
+        const pending = this.pendingApprovals.get(String(parsed.approvalId))
         if (pending) {
           if (parsed.decision === 'allow') {
             pending.resolve('allow')
           } else {
             pending.reject(new Error('Denied by process'))
           }
-          this.pendingApprovals.delete(parsed.approvalId)
+          this.pendingApprovals.delete(String(parsed.approvalId))
         }
         return
       }
 
-      const event: AgentEvent = {
-        type: parsed.type,
-        ...(parsed.state !== undefined ? { state: parsed.state } : {}),
-        ...(parsed.text !== undefined ? { text: parsed.text } : {}),
-        ...(parsed.tool !== undefined ? { tool: parsed.tool, summary: parsed.summary || '' } : {}),
-        ...(parsed.approvalId !== undefined ? { approvalId: parsed.approvalId, action: parsed.action || '', risk: parsed.risk || 'medium' } : {}),
-        ...(parsed.inputTokens !== undefined ? { inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens, costUsd: parsed.costUsd } : {}),
-        ...(parsed.toAgentId !== undefined ? { toAgentId: parsed.toAgentId, task: parsed.task || '', artifacts: parsed.artifacts || [] } : {}),
-      }
+      const event: AgentEvent = this._buildEvent(parsed)
       this.enqueueEvent(event)
     } catch {
       this.enqueueEvent({ type: 'output', text: trimmed })
+    }
+  }
+
+  private _buildEvent(parsed: any): AgentEvent {
+    const type = parsed.type
+
+    switch (type) {
+      case 'status':
+        return { type: 'status', state: (parsed.state as 'working' | 'idle' | 'paused' | 'error' | 'offline') }
+      case 'output':
+        return { type: 'output', text: String(parsed.text || '') }
+      case 'tool_call':
+        return { type: 'tool_call', tool: String(parsed.tool || ''), summary: String(parsed.summary || '') }
+      case 'needs_approval':
+        return {
+          type: 'needs_approval',
+          approvalId: String(parsed.approvalId || ''),
+          action: String(parsed.action || ''),
+          risk: (parsed.risk as 'low' | 'medium' | 'high') || 'medium',
+        }
+      case 'usage':
+        return {
+          type: 'usage',
+          inputTokens: Number(parsed.inputTokens || 0),
+          outputTokens: Number(parsed.outputTokens || 0),
+          costUsd: Number(parsed.costUsd || 0),
+        }
+      case 'handoff':
+        return {
+          type: 'handoff',
+          toAgentId: String(parsed.toAgentId || ''),
+          task: String(parsed.task || ''),
+          artifacts: Array.isArray(parsed.artifacts) ? parsed.artifacts : [],
+        }
+      default:
+        return { type: 'output', text: String(parsed.text || JSON.stringify(parsed)) }
     }
   }
 
